@@ -1,0 +1,82 @@
+server:
+  port: "8080"
+
+# mysql配置
+database:
+  host: "localhost"
+  port: "3306"
+  user: "root"
+  password: "123456"
+  name: "ai_cloud"
+
+jwt:
+  secret: "your-jwt-secret"
+  expiration_hours: 24
+
+# 后端文件存储服务
+storage:
+  type: "minio" # local, oss, minio
+  local:
+    base_dir: "./storage_data"
+  oss:
+    endpoint: "your-oss-endpoint"
+    bucket: "your-oss-bucket"
+    access_key_id: "your-access-key-id"
+    access_key_secret: "your-access-key-secret"
+  minio:
+    endpoint: "localhost:9000"
+    bucket: "ai-cloud"
+    access_key_id: "minioadmin"
+    access_key_secret: "minioadmin"
+    use_ssl: false
+    region: ""
+
+# Milvus向量数据库配置
+milvus:
+  address: "localhost:19530"
+  # collection_name: "text_chunks"
+  # vector_dimension: 1024
+  index_type: "IVF_FLAT"
+  metric_type: "COSINE"
+  nlist: 128
+  # 搜索参数
+  nprobe: 16
+  # 字段最大长度配置
+  id_max_length: "64"
+  content_max_length: "65535"
+  doc_id_max_length: "64"
+  doc_name_max_length: "256"
+  kb_id_max_length: "64"
+
+# 跨域资源共享(CORS)配置
+cors:
+  allow_origins:
+    - "*"
+  allow_methods:
+    - "GET"
+    - "POST"
+    - "PUT"
+    - "PATCH"
+    - "DELETE"
+    - "OPTIONS"
+  allow_headers:
+    - "Origin"
+    - "Content-Type"
+    - "Accept"
+    - "Authorization"
+  expose_headers:
+    - "Content-Length"
+  allow_credentials: true
+  max_age: "12h"
+
+rag:
+  chunk_size: 1500
+  overlap_size: 500
+
+## LLM配置
+llm:
+  api_key: "your-llm-api-key"
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com/v1"
+  max_tokens: 10240
+  temperature: 0.7
