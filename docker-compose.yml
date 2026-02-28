@@ -1,0 +1,148 @@
+version: '3'
+
+services:
+  # =========================================================
+  # 1. MySQL 服务 (关系型数据库)
+  # 作用: 存储用户、文件元数据、知识库信息、聊天记录等结构化数据
+  # =========================================================
+  mysql:
+    image: mysql:8.0
+    ports:
+      - "3307:3306" # 端口映射: 宿主机端口:容器端口
+    volumes:
+      - mysql_data:/var/lib/mysql # 数据卷挂载: 保证重启后数据库数据不丢失
+      - ./deploy/init.sql:/docker-entrypoint-initdb.d/init.sql # 初始化脚本: 容器首次启动时执行建表语句
+    environment:
+      MYSQL_ROOT_PASSWORD: 123456 # root用户密码
+      MYSQL_DATABASE: cloud_ai # 默认创建的数据库名称
+    networks:
+      - cloud-ai-network # 加入的网络
+    restart: always # 崩溃或重启后自动重新启动
+
+  # =========================================================
+  # 2. MinIO 服务 (对象存储)
+  # 作用: 存储实际的文档文件(PDF, TXT等)，提供类似 S3 的文件存储能力
+  # =========================================================
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000" # API 端口: 后端服务通过此端口上传/下载文件
+      - "9001:9001" # Console 端口: 浏览器访问 http://localhost:9001 管理文件
+    volumes:
+      - minio_data:/data # 数据卷挂载: 保证上传的文件持久化存储
+    environment:
+      MINIO_ROOT_USER: minioadmin # 管理员账号
+      MINIO_ROOT_PASSWORD: minioadmin # 管理员密码
+    command: server /data --console-address ":9001" # 启动命令: 指定数据目录和控制台地址
+    networks:
+      - cloud-ai-network
+    healthcheck: # 健康检查: 确保服务启动就绪
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # =========================================================
+  # 3. MinIO 初始化任务 (一次性任务)
+  # 作用: 服务启动后自动创建一个名为 "ai-cloud" 的存储桶(Bucket)，免去手动创建
+  # =========================================================
+  minio-init:
+    image: minio/mc # MinIO Client 命令行工具
+    depends_on:
+      - minio # 等待 minio 服务启动后再执行
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 minioadmin minioadmin; # 配置连接别名
+      /usr/bin/mc mb myminio/ai-cloud; # 创建存储桶 (Ignore if exists)
+      exit 0;
+      "
+    networks:
+      - cloud-ai-network
+
+  # =========================================================
+  # 4. Etcd 服务 (Milvus 依赖组件)
+  # 作用: 分布式键值存储，用于存储 Milvus 的元数据(schema, segment info等)和服务发现
+  # =========================================================
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision # 自动压缩模式
+      - ETCD_AUTO_COMPACTION_RETENTION=1000 # 保留版本数
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296 # 后端存储配额 (4GB)
+      - ETCD_SNAPSHOT_COUNT=50000 # 快照触发阈值
+    volumes:
+      - etcd_data:/etcd # 数据持久化
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - cloud-ai-network
+
+  # =========================================================
+  # 5. MinIO for Milvus (Milvus 专用对象存储)
+  # 作用: 专门给 Milvus 用的存储，存放向量数据的日志、索引文件等。与业务用的 MinIO 隔离。
+  # =========================================================
+  minio-for-milvus:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    volumes:
+      - minio_data_for_milvus:/minio_data
+    command: minio server /minio_data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - cloud-ai-network
+
+  # =========================================================
+  # 6. Milvus Standalone (向量数据库核心)
+  # 作用: 存储文本向量(Embedding)，提供高性能的向量相似度检索(Search)功能
+  # =========================================================
+  standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.4.1
+    command: ["milvus", "run", "standalone"] # 启动单机版模式
+    environment:
+      ETCD_ENDPOINTS: etcd:2379 # 连接 Etcd
+      MINIO_ADDRESS: minio-for-milvus:9000 # 连接专用 MinIO
+    volumes:
+      - milvus_data:/var/lib/milvus # 核心数据持久化
+    ports:
+      - "19530:19530" # Milvus 服务端口 (gRPC/HTTP)
+      - "9091:9091" # Metrics 监控端口
+    depends_on:
+      - etcd
+      - minio-for-milvus
+    networks:
+      - cloud-ai-network
+
+  # =========================================================
+  # 7. Attu (Milvus 管理面板)
+  # 作用: 可视化管理界面，用于查看 Milvus 中的 Collection, Entity, Index 等信息
+  # =========================================================
+  attu:
+    container_name: milvus-attu
+    image: zilliz/attu:latest
+    environment:
+      MILVUS_URL: standalone:19530 # 默认连接的 Milvus 地址
+    ports:
+      - "8000:3000" # 浏览器访问 http://localhost:8000
+    depends_on:
+      - standalone
+    networks:
+      - cloud-ai-network
+    
+volumes:
+  mysql_data: # MySQL 数据卷
+  minio_data: # 业务 MinIO 数据卷
+  etcd_data: # Milvus 元数据卷
+  minio_data_for_milvus: # Milvus 内部存储卷
+  milvus_data: # Milvus 向量数据卷
+
+networks:
+  cloud-ai-network:
+    driver: bridge
