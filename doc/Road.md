@@ -1,6 +1,6 @@
-# AI-Cloud-Go 项目仿写指南
+# AI-Cloud-Go 项目指南
 
-这份指南将帮助你一步步完成 `AI-Cloud-Go` 项目的仿写。本项目是一个基于 Go 语言的 AI 云服务后端，集成了 RAG（检索增强生成）、向量数据库（Milvus）、对象存储（MinIO）以及大模型（LLM）调用能力。
+本项目是一个基于 Go 语言的 AI 云服务后端，集成了 RAG（检索增强生成）、向量数据库（Milvus）、对象存储（MinIO）以及大模型（LLM）调用能力。
 
 ## 1. 项目概览与技术栈
 
@@ -94,7 +94,7 @@ docker-compose up -d
 - **Service**: `UserService` 实现注册、登录（JWT签发）。
 - **Controller**: `UserController` 处理 HTTP 请求。
 
-### 4.2 文件模块
+### 4.2 文件模块(需要补全流式传输)
 - **存储接口**: 定义 `Storage` 接口，实现 `MinIO` 和 `Local` 两种策略。
 - **上传流程**: 接收文件 -> 上传 MinIO -> 记录数据库 `File` 表。
 
