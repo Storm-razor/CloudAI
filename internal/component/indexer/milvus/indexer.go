@@ -1,0 +1,282 @@
+package milvus
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/bytedance/sonic"
+	"github.com/cloudwego/eino/components/embedding"
+	"github.com/cloudwego/eino/components/indexer"
+	"github.com/cloudwego/eino/schema"
+	"github.com/milvus-io/milvus-sdk-go/v2/client"
+	"github.com/milvus-io/milvus-sdk-go/v2/entity"
+	"github.com/wwwzy/CloudAI/config"
+	"github.com/wwwzy/CloudAI/internal/utils"
+	"github.com/wwwzy/CloudAI/pkgs/consts"
+)
+
+type MilvusIndexerConfig struct {
+	Collection string
+	Dimension  int
+	Embedding  embedding.Embedder
+	Client     client.Client
+}
+
+type MilvusIndexer struct {
+	config MilvusIndexerConfig
+}
+
+// ---------------------------
+// @brief 新建一个基于milvus存储的Indexer
+// ---------------------------
+func NewMilvusIndexer(ctx context.Context, conf *MilvusIndexerConfig) (*MilvusIndexer, error) {
+
+	// 检查配置
+	if err := conf.check(); err != nil {
+		return nil, fmt.Errorf("[NewMilvusIndexer] invalid config: %w", err)
+	}
+
+	// 检查Collection是否存在
+	exists, err := conf.Client.HasCollection(ctx, conf.Collection)
+	if err != nil {
+		return nil, fmt.Errorf("[NewMilvusIndexer] check milvus collection failed : %w", err)
+	}
+	if !exists {
+		if err := conf.createCollection(ctx, conf.Collection, conf.Dimension); err != nil {
+			return nil, fmt.Errorf("[NewMilvusIndexer] create collection failed: %w", err)
+		}
+	}
+
+	// 加载Collection
+	err = conf.Client.LoadCollection(ctx, conf.Collection, false)
+	if err != nil {
+		return nil, fmt.Errorf("[NewMilvusIndexer] failed to load collection: %w", err)
+	}
+
+	return &MilvusIndexer{
+		config: *conf,
+	}, nil
+}
+
+// ---------------------------
+// @brief 检查配置是否正确
+// ---------------------------
+func (m *MilvusIndexerConfig) check() error {
+	if m.Client == nil {
+		return fmt.Errorf("[NewMilvusIndexer] milvus client is nil")
+	}
+	if m.Embedding == nil {
+		return fmt.Errorf("[NewMilvusIndexer] embedding is nil")
+	}
+	if m.Collection == "" {
+		return fmt.Errorf("[NewMilvusIndexer] collection is empty")
+	}
+	if m.Dimension == 0 {
+		return fmt.Errorf("[NewMilvusIndexer] embedding dimension is zero")
+	}
+	return nil
+}
+
+// ---------------------------
+// @brief 在milvus中提前创建Collection
+// ---------------------------
+func (m *MilvusIndexerConfig) createCollection(ctx context.Context, collectionName string, dimension int) error {
+	milvusConfig := config.GetConfig().Milvus
+
+	// 创建集合Schema
+	s := &entity.Schema{
+		CollectionName: collectionName,
+		Description:    "存储文档分块与对应向量",
+		AutoID:         false,
+		Fields: []*entity.Field{
+			{
+				Name:       consts.FieldNameID,
+				DataType:   entity.FieldTypeVarChar,
+				PrimaryKey: true,
+				AutoID:     false,
+				TypeParams: map[string]string{
+					"max_length": milvusConfig.IDMaxLength,
+				},
+			},
+			{
+				Name:     consts.FieldNameContent,
+				DataType: entity.FieldTypeVarChar,
+				TypeParams: map[string]string{
+					"max_length": milvusConfig.ContentMaxLength,
+				},
+			},
+			{
+				Name:     consts.FieldNameDocumentID,
+				DataType: entity.FieldTypeVarChar,
+				TypeParams: map[string]string{
+					"max_length": milvusConfig.DocIDMaxLength,
+				},
+			},
+			{
+				Name:     consts.FieldNameKBID,
+				DataType: entity.FieldTypeVarChar,
+				TypeParams: map[string]string{
+					"max_length": milvusConfig.KbIDMaxLength,
+				},
+			},
+			{
+				Name:     consts.FieldNameVector,
+				DataType: entity.FieldTypeFloatVector,
+				TypeParams: map[string]string{
+					"dim": strconv.Itoa(dimension),
+				},
+			},
+			{
+				Name:     consts.FieldNameMetadata,
+				DataType: entity.FieldTypeJSON,
+			},
+		},
+	}
+
+	//创建集合
+	if err := m.Client.CreateCollection(ctx, s, 1); err != nil {
+		return fmt.Errorf("[NewMilvusIndexer.createCollection] 创建集合失败: %w", err)
+	}
+
+	//创建索引
+	idx, err := milvusConfig.GetMilvusIndex()
+	if err != nil {
+		return fmt.Errorf("[NewMilvusIndexer.createCollection] 从配置中获取索引类型失败: %w", err)
+	}
+
+	if err := m.Client.CreateIndex(ctx, collectionName, consts.FieldNameVector, idx, false); err != nil {
+		return fmt.Errorf("[NewMilvusIndexer.createCollection] 创建索引失败: %w", err)
+	}
+
+	return nil
+
+}
+
+// ---------------------------
+// @brief 存储对应文档
+// ---------------------------
+func (m *MilvusIndexer) Store(ctx context.Context, docs []*schema.Document, opts ...indexer.Option) (ids []string, err error) {
+	co := indexer.GetCommonOptions(&indexer.Options{
+		SubIndexes: nil,
+		Embedding:  m.config.Embedding,
+	}, opts...)
+
+	embedder := co.Embedding
+
+	if embedder == nil {
+		return nil, fmt.Errorf("[Indexer.Store] embedding not provided")
+	}
+
+	texts := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		texts = append(texts, doc.Content)
+	}
+
+	vector := make([][]float64, len(texts))
+
+	for i, text := range texts {
+		vec, err := embedder.EmbedStrings(ctx, []string{text})
+		if err != nil {
+			return nil, fmt.Errorf("[Indexer.Store] failed to embed text at index %d: %w", i, err)
+		}
+
+		if len(vec) != 1 {
+			return nil, fmt.Errorf("[Indexer.Store] unexpected number of vectors returned: %d", len(vec))
+		}
+
+		vector[i] = vec[0]
+	}
+
+	if len(vector) != len(docs) {
+		return nil, fmt.Errorf("[Indexer.Store] embedding vector length mismatch")
+	}
+
+	rows, err := DocumentConvert(ctx, docs, vector)
+	if err != nil {
+		return nil, err
+	}
+
+	results, err := m.config.Client.InsertRows(ctx, m.config.Collection, "", rows)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.config.Client.Flush(ctx, m.config.Collection, false); err != nil {
+		return nil, err
+	}
+
+	ids = make([]string, results.Len())
+	for idx := 0; idx < results.Len(); idx++ {
+		ids[idx], err = results.GetAsString(idx)
+		if err != nil {
+			return nil, fmt.Errorf("[Indexer.Store] failed to get id: %w", err)
+		}
+	}
+
+	return ids, nil
+}
+
+// ---------------------------
+// @brief 构造对应的milvus结构
+// ---------------------------
+func DocumentConvert(ctx context.Context, docs []*schema.Document, vectors [][]float64) ([]interface{}, error) {
+	em := make([]defaultSchema, 0, len(docs))
+	rows := make([]interface{}, 0, len(docs))
+
+	for _, doc := range docs {
+		kbID, ok := doc.MetaData["kb_id"].(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid type for kb_id")
+		}
+
+		docID, ok := doc.MetaData["document_id"].(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid type for document_id")
+		}
+
+		metaCopy := make(map[string]any, len(doc.MetaData))
+		for k, v := range doc.MetaData {
+			if k == "kb_id" || k == "document_id" {
+				continue
+			}
+			metaCopy[k] = v
+		}
+
+		metadataBytes, err := sonic.Marshal(metaCopy)
+		if err != nil {
+			return nil, fmt.Errorf("[DocumentConvert] failed to marshal metadata: %w", err)
+		}
+
+		em = append(em, defaultSchema{
+			ID:         doc.ID,
+			Content:    doc.Content,
+			KBID:       kbID,
+			DocumentID: docID,
+			Vector:     nil,           // 后面统一填充
+			Metadata:   metadataBytes, // 只包含剩下的字段
+		})
+	}
+
+	for idx, vec := range vectors {
+		em[idx].Vector = utils.ConvertFloat64ToFloat32Embedding(vec)
+		rows = append(rows, &em[idx])
+	}
+
+	return rows, nil
+}
+
+// ---------------------------
+// @brief 删除对应的文档
+// ---------------------------
+func DeleteDos(client client.Client, docIDs []string, collectionName string) error {
+	expr := fmt.Sprintf("%s in [\"%s\"]", consts.FieldNameDocumentID, strings.Join(docIDs, "\",\""))
+	if err := client.Delete(context.Background(), collectionName, "", expr); err != nil {
+		return fmt.Errorf("[MilvusIndexer.DeleteDos] failed to delete documents: %w", err)
+	}
+	return nil
+}
+
+func (m *MilvusIndexerConfig) IsCallbacksEnabled() bool {
+	return true
+}

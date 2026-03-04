@@ -111,9 +111,12 @@ docker-compose up -d
 - 实现 `GetLLMClient` 工厂方法。
 - 支持 `OpenAI` 和 `Ollama` 适配器。
 
-### 5.2 向量化组件 (`internal/component/embedding/`)
-- 封装 Embedding 接口 (如 OpenAI Embedding 或 Ollama Embedding)。
-- 输入文本 -> 输出 `[]float32`。
+### 5.2 Agent组件 (`internal/component/`)
+- **Embedding**: 文本向量化组件 (OpenAI, Ollama, DeepSeek)。
+- **Indexer**: 向量索引组件 (Milvus)。
+- **LLM**: 大模型调用组件 (OpenAI, Ollama, DeepSeek)。
+- **Parser**: 文档解析组件 (docconv, PDF/TXT)(TODO: 支持更多格式,降低内存占用)。
+- **Retriever**: 向量检索组件 (Milvus)。
 
 ### 5.3 知识库服务 (`internal/service/kb_service.go`)
 **RAG 流程**:
@@ -163,4 +166,3 @@ docker-compose up -d
 4.  创建 Agent，关联知识库。
 5.  发起对话，验证是否能基于知识库回答。
 
-祝你编码愉快！
