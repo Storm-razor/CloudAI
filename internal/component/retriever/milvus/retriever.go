@@ -129,6 +129,10 @@ func (m *MilvusRetriever) Retrieve(ctx context.Context, query string, opts ...re
 	var results []client.SearchResult
 	sp, _ := entity.NewIndexIvfFlatSearchParam(config.GetConfig().Milvus.Nprobe)
 	metricType := config.GetConfig().Milvus.GetMetricType()
+	topK := m.config.TopK
+	if co.TopK != nil {
+		topK = *co.TopK
+	}
 	results, err = m.config.Client.Search(
 		ctx,
 		m.config.Collection,
@@ -138,7 +142,7 @@ func (m *MilvusRetriever) Retrieve(ctx context.Context, query string, opts ...re
 		[]entity.Vector{entity.FloatVector(vector)},
 		consts.FieldNameVector,
 		metricType,
-		m.config.TopK,
+		topK,
 		sp,
 	)
 

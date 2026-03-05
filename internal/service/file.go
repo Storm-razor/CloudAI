@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/wwwzy/CloudAI/config"
 	"github.com/wwwzy/CloudAI/internal/dao"
 	"github.com/wwwzy/CloudAI/internal/storage"
+	"github.com/wwwzy/CloudAI/internal/utils"
 	"github.com/wwwzy/CloudAI/model"
 	"gorm.io/gorm"
 )
@@ -395,7 +395,7 @@ func (fs *fileService) checkCircularReference(sourceID, targetParentID string) e
 }
 
 func GenerateUUID() string {
-	return uuid.New().String()
+	return utils.GenerateUUID()
 }
 func GenerateStorageKey(userID uint, fileID string) string {
 	return fmt.Sprintf("user%v-%s", userID, fileID)
