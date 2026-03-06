@@ -13,6 +13,7 @@ require (
 	github.com/cloudwego/eino-ext/components/model/ollama v0.1.8
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.8
 	github.com/cloudwego/eino-ext/components/tool/mcp v0.0.8
+	github.com/gin-contrib/cors v1.7.2
 	github.com/gin-contrib/sse v1.1.0
 	github.com/gin-gonic/gin v1.10.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
