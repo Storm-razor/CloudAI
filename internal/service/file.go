@@ -8,7 +8,6 @@ import (
 	"mime"
 	"mime/multipart"
 	"path/filepath"
-	"time"
 
 	"github.com/wwwzy/CloudAI/config"
 	"github.com/wwwzy/CloudAI/internal/dao"
@@ -72,8 +71,6 @@ func (fs *fileService) UploadFile(userID uint,
 		MIMEType:    mimeType,
 		StorageType: config.AppConfigInstance.Storage.Type,
 		StorageKey:  key,
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
 	}
 
 	if parentID != "" {
@@ -151,8 +148,6 @@ func (fs *fileService) CreateFolder(userID uint, name string, parentID *string) 
 		IsDir:       true,
 		ParentID:    parentID,
 		StorageType: "dir", // 特殊标识
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
 	}
 
 	if err := fs.fileDao.CreateFile(newFolder); err != nil {
@@ -181,7 +176,6 @@ func (fs *fileService) Rename(userID uint, fileID string, newName string) error 
 	}
 	// 更新信息
 	file.Name = newName
-	file.UpdatedAt = time.Now()
 	if err := fs.fileDao.UpdateFile(file); err != nil {
 		return errors.New("重命名失败")
 	}
@@ -354,7 +348,6 @@ func (fs *fileService) BatchMoveFiles(userID uint, fileIDs []string, targetParen
 		// 更新文件信息
 		file.Name = newName
 		file.ParentID = targetParentIDPtr
-		file.UpdatedAt = time.Now()
 
 		if err := fs.fileDao.UpdateFile(file); err != nil {
 			return fmt.Errorf("更新文件信息失败: %w", err)
@@ -469,13 +462,11 @@ func (fs *fileService) InitKnowledgeDir(userID uint) (string, error) {
 		// 只有在记录不存在时才创建新目录
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			newFolder := &model.File{
-				ID:        GenerateUUID(),
-				UserID:    userID,
-				IsDir:     true,
-				Name:      "知识库文件",
-				ParentID:  nil,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
+				ID:       GenerateUUID(),
+				UserID:   userID,
+				IsDir:    true,
+				Name:     "知识库文件",
+				ParentID: nil,
 			}
 			if err := fs.fileDao.CreateFile(newFolder); err != nil {
 				return "", fmt.Errorf("创建知识库目录失败: %w", err)

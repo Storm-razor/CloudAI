@@ -2,9 +2,22 @@ package service
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
 
+	einoMcp "github.com/cloudwego/eino-ext/components/tool/mcp"
+	"github.com/cloudwego/eino/components/prompt"
+	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/flow/agent/react"
 	"github.com/cloudwego/eino/schema"
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/mcp"
 	ginmodel "github.com/wwwzy/CloudAI/gin_model"
+	llmfactory "github.com/wwwzy/CloudAI/internal/component/llm"
+	mRetriever "github.com/wwwzy/CloudAI/internal/component/retriever/milvus"
 	"github.com/wwwzy/CloudAI/internal/dao"
 	"github.com/wwwzy/CloudAI/model"
 )
@@ -29,14 +42,13 @@ type AgentService interface {
 	StreamExecuteAgent(ctx context.Context, userID uint, agentID string, msg ginmodel.UserMessage) (*schema.StreamReader[*schema.Message], error)
 }
 
-// TODO: 实现HistoryService
 type agentService struct {
-	dao      dao.AgentDao
-	modelSvc ModelService
-	kbSvc    KBService
-	kbDao    dao.KnowledgeBaseDao
-	modelDao dao.ModelDao
-	//historySvc HistoryService
+	dao        dao.AgentDao
+	modelSvc   ModelService
+	kbSvc      KBService
+	kbDao      dao.KnowledgeBaseDao
+	modelDao   dao.ModelDao
+	historySvc HistoryService
 }
 
 func NewAgentService(dao dao.AgentDao,
@@ -44,15 +56,235 @@ func NewAgentService(dao dao.AgentDao,
 	kbSvc KBService,
 	kbDao dao.KnowledgeBaseDao,
 	modelDao dao.ModelDao,
-	//historySvc HistoryService,
+	historySvc HistoryService,
 ) AgentService {
-	// return &agentService{
-	// 	dao:        ctx,
-	// 	modelSvc:   modelSvc,
-	// 	kbSvc:      kbSvc,
-	// 	kbDao:      kbDao,
-	// 	modelDao:   modelDao,
-	// 	historySvc: historySvc,
-	// }
-	return nil
+	return &agentService{
+		dao:        dao,
+		modelSvc:   modelSvc,
+		kbSvc:      kbSvc,
+		kbDao:      kbDao,
+		modelDao:   modelDao,
+		historySvc: historySvc,
+	}
+}
+
+func (s *agentService) CreateAgent(ctx context.Context, agent *model.Agent) error {
+	return s.dao.Create(ctx, agent)
+}
+
+func (s *agentService) UpdateAgent(ctx context.Context, agent *model.Agent) error {
+	return s.dao.Update(ctx, agent)
+}
+
+func (s *agentService) DeleteAgent(ctx context.Context, userID uint, agentID string) error {
+	return s.dao.Delete(ctx, userID, agentID)
+}
+
+func (s *agentService) GetAgent(ctx context.Context, userID uint, agentID string) (*model.Agent, error) {
+	return s.dao.GetByID(ctx, userID, agentID)
+}
+
+func (s *agentService) ListAgents(ctx context.Context, userID uint) ([]*model.Agent, error) {
+	return s.dao.List(ctx, userID)
+}
+
+func (s *agentService) PageAgents(ctx context.Context, userID uint, page, size int) ([]*model.Agent, int64, error) {
+	return s.dao.Page(ctx, userID, page, size)
+}
+
+func (s *agentService) ExecuteAgent(ctx context.Context, userID uint, agentID string, msg ginmodel.UserMessage) (string, error) {
+	// Retrieve the agent
+	agent, err := s.dao.GetByID(ctx, userID, agentID)
+	if err != nil {
+		return "", err
+	}
+	
+	// Parse the agent schema
+	var agentSchema model.AgentSchema
+	if err := json.Unmarshal([]byte(agent.AgentSchema), &agentSchema); err != nil {
+		return "", err
+	}
+
+	graph, err := s.buildGraph(ctx, userID, agentSchema)
+	if err != nil {
+		return "", fmt.Errorf("buildGraph失败：%w", err)
+	}
+	
+	runner, err := graph.Compile(ctx, compose.WithGraphName("EinoAgent"), compose.WithNodeTriggerMode(compose.AllPredecessor))
+
+	if err != nil {
+		return "", err
+	}
+
+	res, err := runner.Invoke(ctx, &msg)
+	if err != nil {
+		return "", err
+	}
+	return res.String(), nil
+}
+
+func (s *agentService) StreamExecuteAgent(ctx context.Context, userID uint, agentID string, msg ginmodel.UserMessage) (*schema.StreamReader[*schema.Message], error) {
+	// 1.获取Agent配置
+	agent, err := s.dao.GetByID(ctx, userID, agentID)
+	if err != nil {
+		return nil, err
+	}
+
+	var agentSchema model.AgentSchema
+	if err := json.Unmarshal([]byte(agent.AgentSchema), &agentSchema); err != nil {
+		return nil, err
+	}
+
+	// 2.构建Graph
+	graph, err := s.buildGraph(ctx, userID, agentSchema)
+	if err != nil {
+		return nil, fmt.Errorf("failed to build agent graph：%w", err)
+	}
+
+	// 3.构建runner
+	runner, err := graph.Compile(ctx, compose.WithGraphName("EinoAgent"), compose.WithNodeTriggerMode(compose.AllPredecessor))
+	if err != nil {
+		return nil, fmt.Errorf("failed to compile agent graph: %w", err)
+	}
+
+	// 执行stream
+	sr, err := runner.Stream(ctx, &msg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to stream: %w", err)
+	}
+
+	return sr, nil
+}
+
+func (s *agentService) buildGraph(ctx context.Context, 
+	userID uint, 
+	agentSchema model.AgentSchema) (
+		*compose.Graph[*ginmodel.UserMessage, *schema.Message], error) {
+	// 创建LLM
+	llmModelCfg, err := s.modelSvc.GetModel(ctx, userID, agentSchema.LLMConfig.ModelID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get model: %w", err)
+	}
+
+	llm,err := llmfactory.GetLLMClient(ctx,llmModelCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create llm client:%w", err)
+	}
+
+	multiRetriever := mRetriever.MultiKBRetriever{
+		KBIDs:    agentSchema.Knowledge.KnowledgeIDs,
+		UserID:   userID,
+		KBDao:    s.kbDao,
+		ModelDao: s.modelDao,
+		TopK:     agentSchema.Knowledge.TopK, // 默认返回前5个最相关的文档
+	}
+
+	// 3. 构建Tools
+	tools := []tool.BaseTool{}
+	// 3.1 加载MCP Tools
+	for _,serverURL := range agentSchema.MCP.Servers {
+		cli,err := client.NewSSEMCPClient(serverURL)
+		err = cli.Start(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mcp client: %w", err)
+		}
+
+		// 初始化请求
+		initRequest := mcp.InitializeRequest{}
+		initRequest.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
+		initRequest.Params.ClientInfo = mcp.Implementation{
+			Name:    "example-client",
+			Version: "1.0.0",
+		}
+		_, err = cli.Initialize(ctx, initRequest)
+		if err != nil {
+			return nil, err
+		}
+
+		// 获取MCP工具
+		mcpTools,err := einoMcp.GetTools(ctx,&einoMcp.Config{
+			Cli: cli,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to get mcpp tools: %w", err)
+		}
+		tools = append(tools, mcpTools...)
+	}
+
+	// TODO:加载系统Tool和用户自定义Tool
+
+	// 4. 构建提示词
+	promptTemplate := prompt.FromMessages(
+		schema.FString,
+		schema.SystemMessage(agentSchema.Prompt),
+		schema.MessagesPlaceholder("history", true),
+		schema.UserMessage("用户消息：{query}\n 参考信息：{documents}"),
+	)
+
+	// 5. 构建Graph
+	graph := compose.NewGraph[*ginmodel.UserMessage,*schema.Message]()
+	_ = graph.AddLambdaNode(InputToQuery,compose.InvokableLambdaWithOption(inputToQueryLambda),compose.WithNodeName("UserMessageToQuery"))
+	_ = graph.AddChatTemplateNode(ChatTemplate,promptTemplate)
+	_ = graph.AddRetrieverNode(Retriever,multiRetriever, compose.WithOutputKey("documents"))
+	_ = graph.AddLambdaNode(InputToHistory, compose.InvokableLambdaWithOption(inputToHistoryLambda), compose.WithNodeName("UserMessageToHistory"))
+	// 5.1 判断是否使用MCP工具
+	if len(tools) > 0 {
+		// 若有工具,直接使用eino封装的ReactAgent
+		agentConfig := &react.AgentConfig{
+			ToolCallingModel: llm,
+			MaxStep: 10,
+			ToolsConfig: compose.ToolsNodeConfig{
+				Tools: tools,
+			},
+		}
+
+		agt,err := react.NewAgent(ctx,agentConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create agent: %w", err)
+		}
+		if agt == nil {
+			return nil, errors.New("react.NewAgent returned a nil agent instance")
+		}
+
+		agentLambda,_ := compose.AnyLambda(agt.Generate,agt.Stream,nil,nil)
+		_ = graph.AddLambdaNode(Agent, agentLambda, compose.WithNodeName("Agent"))
+
+		_ = graph.AddEdge(compose.START, InputToQuery)
+		_ = graph.AddEdge(compose.START, InputToHistory)
+		_ = graph.AddEdge(InputToQuery, Retriever)
+		_ = graph.AddEdge(Retriever, ChatTemplate)
+		_ = graph.AddEdge(InputToHistory, ChatTemplate)
+		_ = graph.AddEdge(ChatTemplate, Agent)
+		_ = graph.AddEdge(Agent, compose.END)
+	}else{
+		// 没有工具需要调用,直接使用ChatModel
+		_ = graph.AddChatModelNode(ChatModel, llm)
+
+		_ = graph.AddEdge(compose.START, InputToQuery)
+		_ = graph.AddEdge(compose.START, InputToHistory)
+		_ = graph.AddEdge(InputToQuery, Retriever)
+		_ = graph.AddEdge(Retriever, ChatTemplate)
+		_ = graph.AddEdge(InputToHistory, ChatTemplate)
+		_ = graph.AddEdge(ChatTemplate, ChatModel)
+		_ = graph.AddEdge(ChatModel, compose.END)
+	}
+
+	return graph,nil
+}
+
+//---------------------------
+//@brief agent输入的用户信息提取问题
+//---------------------------
+func inputToQueryLambda(ctx context.Context, input *ginmodel.UserMessage, opts ...any) (output string, err error) {
+	return input.Query, nil
+}
+//---------------------------
+//@brief agent输入的用户信息转为历史记录
+//---------------------------
+func inputToHistoryLambda(ctx context.Context, input *ginmodel.UserMessage, opts ...any) (output map[string]any, err error) {
+	return map[string]any{
+		"query":   input.Query,
+		"history": input.History,
+		"date":    time.Now().Format(time.DateTime),
+	}, nil
 }

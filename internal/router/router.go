@@ -10,7 +10,9 @@ func SetUpRouters(r *gin.Engine,
 	uc *controller.UserController,
 	fc *controller.FileController,
 	kc *controller.KBController,
-	mc *controller.ModelController) {
+	mc *controller.ModelController,
+	ac *controller.AgentController,
+	cc *controller.ConversationController) {
 	api := r.Group("/api")
 	{
 		publicUser := api.Group("/user")
@@ -62,6 +64,32 @@ func SetUpRouters(r *gin.Engine,
 			model.GET("/get", mc.GetModel)
 			model.GET("/page", mc.PageModels)
 			model.GET("/list", mc.ListModels)
+		}
+
+		agent := api.Group("agent")
+		agent.Use(middlerware.JWTAuth())
+		{
+			agent.POST("/create", ac.CreateAgent)
+			agent.POST("/update", ac.UpdateAgent)
+			agent.DELETE("/delete", ac.DeleteAgent)
+			agent.GET("/get", ac.GetAgentDetail)
+			agent.GET("/page", ac.PageAgents)
+			agent.POST("/execute/:id", ac.ExecuteAgent)
+			agent.POST("/stream", ac.StreamExecuteAgent)
+		}
+
+		conv := api.Group("chat")
+		conv.Use(middlerware.JWTAuth())
+		{
+			// 调试模式，不保存历史
+			conv.POST("/debug", cc.DebugStreamAgent)
+			// 会话相关功能
+			conv.POST("/create", cc.CreateConversation)
+			conv.POST("/stream", cc.StreamConversation)
+			conv.GET("/list", cc.ListConversations)
+			conv.GET("/list/agent", cc.ListAgentConversations)
+			conv.GET("/history", cc.GetConversationHistory)
+			conv.DELETE("/delete", cc.DeleteConversation)
 		}
 	}
 }
