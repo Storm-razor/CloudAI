@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log"
 
 	"github.com/gin-gonic/gin"
 	"github.com/wwwzy/CloudAI/config"
@@ -16,6 +17,9 @@ import (
 
 func main() {
 	config.InitConfig()
+	cfg := config.GetConfig()
+	log.Printf("Config loaded: server.port=%s storage.type=%s storage.minio.endpoint=%s storage.minio.bucket=%s milvus.address=%s", cfg.Server.Port, cfg.Storage.Type, cfg.Storage.Minio.Endpoint, cfg.Storage.Minio.Bucket, cfg.Milvus.Address)
+
 	ctx := context.Background()
 
 	db, _ := database.GetDB()

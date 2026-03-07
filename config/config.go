@@ -27,9 +27,9 @@ func InitConfig() {
 	// 	}
 	// })
 
-	// if err := viper.Unmarshal(AppConfigInstance); err != nil {
-	// 	log.Fatalf("Unable to decode into struct: %v", err)
-	// }
+	if err := viper.Unmarshal(AppConfigInstance); err != nil {
+		log.Fatalf("Unable to decode into struct: %v", err)
+	}
 }
 
 // GetConfig 获取配置

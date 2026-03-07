@@ -135,6 +135,35 @@ services:
       - standalone
     networks:
       - cloud-ai-network
+
+  cloudai:
+    image: github.com/wwwzy/cloudai
+    container_name: cloudai
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./etc/config.yaml:/app/etc/config.yaml:ro
+    depends_on:
+      - mysql
+      - minio
+      - minio-init
+      - standalone
+    networks:
+      - cloud-ai-network
+
+  nginx:
+    image: nginx:alpine
+    container_name: cloudai-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - cloudai
+    networks:
+      - cloud-ai-network
     
 volumes:
   mysql_data: # MySQL 数据卷
